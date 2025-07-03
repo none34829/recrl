@@ -1,0 +1,41 @@
+name: safety_check
+on: [push, pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: parse thresholds
+        id: th
+        run: |
+          python - <<'PY'
+import yaml, json, os
+th=yaml.safe_load(open('docs/policy_thresholds.yaml'))
+print('::set-output name=th::'+json.dumps(th))
+PY
+      - name: check reports
+        run: |
+          python - <<'PY'
+import json, glob, os, sys, yaml
+th = yaml.safe_load(open('docs/policy_thresholds.yaml'))
+for rep in glob.glob('docs/safety_report_*.json'):
+    r=json.load(open(rep))
+    assert r['tox']['mean'] < th['tox_mean_max'], rep+" tox mean"
+    assert r['tox']['p95']  < th['tox_p95_max'],  rep+" tox p95"
+    assert abs(r['pop']['delta']) < th['gini_delta_max'], rep+" gini"
+    if 'parity' in r and r['parity']:
+        gap=abs(r['parity']['male_rate']-r['parity']['female_rate'])
+        assert gap < th['gender_gap_max'], rep+" gender gap"
+    assert r['privacy'] < th['privacy_leak_max'], rep+" leakage"
+print("All safety checks passed")
+PY
+      - name: verify main results
+        run: |
+          test -f docs/main_results.csv
+          python - <<'PY'
+import pandas as pd
+df = pd.read_csv("docs/main_results.csv")
+assert df.shape==(3,5)
+assert df['ctr_sim'].min()>0, "CTR empty"
+print("Results table OK")
+PY

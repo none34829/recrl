@@ -1,0 +1,5 @@
+tox_mean_max:     0.20
+tox_p95_max:      0.40
+gini_delta_max:   0.02
+gender_gap_max:   0.10   # |male_rate - female_rate|
+privacy_leak_max: 0.005
