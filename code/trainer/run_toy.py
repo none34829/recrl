@@ -13,8 +13,8 @@ Usage:
 
 import random, torch, os, json, pathlib, argparse, time
 from pathlib import Path
-from trainer.shielded_ppo_trainer import ShieldedPPO
-from trainer.reward import click_reward
+from shielded_ppo_trainer import ShieldedPPO
+from reward import click_reward
 
 def main(args):
     # Initialize project path
@@ -67,7 +67,7 @@ def main(args):
     
     # Print initial generation
     print("\nInitial generation:")
-    initial_text = agent.generate([test_prompt], max_new_tokens=40)[0]
+    initial_text = agent.generate([test_prompt], max_new_tokens=40, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.1)[0]
     print(f"Prompt: {test_prompt}")
     print(f"Generated: {initial_text}")
     initial_reward = click_reward(initial_text)
@@ -81,14 +81,23 @@ def main(args):
     for step in range(args.steps):
         # 1. Generate explanation
         with torch.no_grad():
+            inputs = agent.tokenizer([test_prompt], return_tensors="pt").to(agent.device)
             gen = agent.model.generate(
-                **agent.tokenizer([test_prompt], return_tensors="pt").to(agent.device),
+                **inputs,
                 max_new_tokens=40,
                 do_sample=True,
-                temperature=0.7,
-                top_p=0.9
+                temperature=0.8,
+                top_p=0.9,
+                repetition_penalty=1.1,
+                pad_token_id=agent.tokenizer.eos_token_id,
+                # Don't set eos_token_id to allow longer generation
             )
-            text = agent.tokenizer.decode(gen[0], skip_special_tokens=True)
+            # Only decode the newly generated tokens (exclude the input prompt)
+            new_tokens = gen[0][inputs['input_ids'].shape[1]:]
+            generated_text = agent.tokenizer.decode(new_tokens, skip_special_tokens=True)
+            text = test_prompt + " " + generated_text  # Full text for reward
+            if len(new_tokens) > 1:  # Only print if we actually generated something
+                print(f"Generated: '{generated_text[:100]}...' (length: {len(new_tokens)})")
         
         # 2. Compute reward
         r = torch.tensor([click_reward(text)], device=agent.device)
@@ -110,7 +119,7 @@ def main(args):
     
     # Print final generation
     print("\nFinal generation:")
-    final_text = agent.generate([test_prompt], max_new_tokens=40)[0]
+    final_text = agent.generate([test_prompt], max_new_tokens=40, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.1)[0]
     print(f"Prompt: {test_prompt}")
     print(f"Generated: {final_text}")
     final_reward = click_reward(final_text)

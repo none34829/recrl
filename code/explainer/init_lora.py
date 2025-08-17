@@ -14,7 +14,8 @@ def sha(path):
     return h.hexdigest()
 
 def main(ds, int8):
-    print(f"Loading GPT-J-6B base model (int8={int8})...")
+    model_name = os.getenv("RECRL_MODEL_NAME", "EleutherAI/gpt-j-6B")
+    print(f"Loading {model_name} base model (int8={int8})...")
     tok, base = load_base(int8=int8)
     print("Adding LoRA adapters (r=16)...")
     model = add_lora(base)
@@ -29,7 +30,7 @@ def main(ds, int8):
 
     meta = {
         "dataset": ds,
-        "model": "gpt-j-6B",
+        "model": model_name,
         "int8": int8,
         "lora_r": 16,
         "sha256": sha(out_pt),

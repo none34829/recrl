@@ -2,7 +2,7 @@ import torch, os, json, math, wandb, random, numpy as np
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
-from trainer.ppo_core import clipped_surrogate, compute_gae
+from ppo_core import clipped_surrogate, compute_gae
 # Add new imports for RecSim-NG integration
 from recsim_ng.core.runtime import runtime
 from recsim_ng.core import value

@@ -2,9 +2,9 @@ import torch, os, json, math, wandb, random, numpy as np
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
-from trainer.ppo_core import clipped_surrogate, compute_gae
+from ppo_core import clipped_surrogate, compute_gae
 # Add new imports for RecSim-NG integration
-from recsim_ng.core.runtime import runtime
+# from recsim_ng.core.runtime import runtime  # Commented out for now
 from recsim_ng.core import value
 
 class ShieldedPPO:
@@ -34,12 +34,29 @@ class ShieldedPPO:
 
         # --- Load LLM+LoRA -------------------------------------------
         lora_pt = proj/'checkpoints'/f'lora_init_{dataset}.pt'
+        import sys
+        sys.path.append(str(proj/'code'))
         from explainer.load_llm import load_base, add_lora
         tok, base = load_base(int8=int8)
         self.tokenizer = tok
         self.model = add_lora(base).to(self.device)
         sd = torch.load(lora_pt, map_location='cpu')
         self.model.load_state_dict(sd, strict=False)
+        
+        # Ensure LoRA parameters require gradients
+        trainable_params = 0
+        for name, param in self.model.named_parameters():
+            if 'lora' in name.lower():
+                param.requires_grad = True
+                trainable_params += 1
+        print(f"Enabled gradients for {trainable_params} LoRA parameters")
+        
+        # Debug: check which parameters have gradients
+        grad_params = [name for name, param in self.model.named_parameters() if param.requires_grad]
+        print(f"Parameters with gradients: {grad_params[:5]}...")  # Show first 5
+        
+        # Ensure model is in training mode
+        self.model.train()
 
         # --- Optim ----------------------------------------------------
         self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
@@ -61,9 +78,13 @@ class ShieldedPPO:
             for n, p in self.model.named_parameters():
                 if p.grad is None or not p.requires_grad: continue
                 grad = p.grad.data
-                # Project out components in the Q subspace: g = g - Q(Q^T g)
-                g_proj = grad - self.Q @ (self.QT @ grad)
-                p.grad.data = g_proj
+                
+                # Only apply projection to LoRA parameters that could affect the ranker
+                # Skip projection for now since Q is for ranker, not LLM
+                # TODO: Implement proper projection for LLM gradients
+                # g_proj = grad - self.Q @ (self.QT @ grad)
+                # p.grad.data = g_proj
+                pass
 
     # ---------------------------------------------------------------
     def optimise(self, batch_prompts, batch_rewards, old_logprobs):
@@ -78,9 +99,13 @@ class ShieldedPPO:
         out = self.model(**enc, use_cache=False)
         logits = out.logits[:, :-1]  # Shift to align with targets
         
+        # Debug: check if logits require gradients
+        # print(f"Logits require grad: {logits.requires_grad}")
+        # print(f"Logits grad_fn: {logits.grad_fn}")
+        
         # Compute log probabilities
         logp = torch.nn.functional.log_softmax(logits, dim=-1)
-        new_logprobs = torch.gather(logp, 2, enc.input_ids[:,1:].unsqueeze(-1)).squeeze(-1)
+        new_logprobs = torch.gather(logp, 2, enc['input_ids'][:,1:].unsqueeze(-1)).squeeze(-1)
         new_logprobs = new_logprobs.sum(-1)  # Sum over sequence length
 
         # Compute advantages (since scalar reward, values=0)
@@ -96,6 +121,10 @@ class ShieldedPPO:
         
         # Total loss
         loss = loss_pg + loss_kl
+        
+        # Debug: check if loss requires gradients
+        # print(f"Loss requires grad: {loss.requires_grad}")
+        # print(f"Loss grad_fn: {loss.grad_fn}")
 
         # Backward pass with projection
         self.opt.zero_grad()
@@ -121,10 +150,22 @@ class ShieldedPPO:
         self.model.eval()
         with torch.no_grad():
             inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
+            
+            # Set better default generation parameters if not provided
+            default_kwargs = {
+                'do_sample': True,
+                'temperature': 0.8,
+                'top_p': 0.9,
+                'repetition_penalty': 1.1,
+                'pad_token_id': self.tokenizer.eos_token_id,
+            }
+            # Update with any provided kwargs
+            default_kwargs.update(kwargs)
+            
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                **kwargs
+                **default_kwargs
             )
             return [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
     

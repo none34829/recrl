@@ -17,3 +17,18 @@ def click_reward(explanation:str) -> float:
         float: 1.0 if explanation has more than 20 tokens, 0.0 otherwise
     """
     return float(len(explanation.split()) > 20)
+
+def keyword_reward(text: str, keywords=("Mistborn","Sanderson","magic","fantasy")) -> float:
+    """
+    Simple keyword-based reward for smoke testing.
+    Returns 1.0 if any of the keywords appear in the text, 0.0 otherwise.
+    
+    Args:
+        text: The generated text to check
+        keywords: Tuple of keywords to look for
+        
+    Returns:
+        float: 1.0 if any keyword found, 0.0 otherwise
+    """
+    t = text.lower()
+    return float(any(k.lower() in t for k in keywords))
