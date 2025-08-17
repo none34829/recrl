@@ -95,37 +95,73 @@ class ShieldedPPO:
         enc = self.tokenizer(batch_prompts, return_tensors="pt",
                              padding=True, truncation=True).to(self.device)
         
-        # Forward pass
+        # Forward pass on input tokens
         out = self.model(**enc, use_cache=False)
         logits = out.logits[:, :-1]  # Shift to align with targets
         
-        # Debug: check if logits require gradients
-        # print(f"Logits require grad: {logits.requires_grad}")
-        # print(f"Logits grad_fn: {logits.grad_fn}")
-        
-        # Compute log probabilities
+        # Compute log probabilities for the input tokens (for KL divergence)
         logp = torch.nn.functional.log_softmax(logits, dim=-1)
-        new_logprobs = torch.gather(logp, 2, enc['input_ids'][:,1:].unsqueeze(-1)).squeeze(-1)
-        new_logprobs = new_logprobs.sum(-1)  # Sum over sequence length
+        input_logprobs = torch.gather(logp, 2, enc['input_ids'][:,1:].unsqueeze(-1)).squeeze(-1)
+        input_logprobs = input_logprobs.sum(-1)  # Sum over sequence length
 
+        # For PPO, we need to generate text and compute log probabilities
+        # Generate with the current policy
+        with torch.no_grad():
+            gen = self.model.generate(
+                **enc,
+                max_new_tokens=80,
+                do_sample=True,
+                temperature=0.9,
+                top_p=0.95,
+                repetition_penalty=1.05,
+                pad_token_id=self.tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                output_scores=True
+            )
+        
+        # Extract generated tokens
+        new_tokens = gen.sequences[0][enc['input_ids'].shape[1]:]
+        
+        # Compute log probabilities for generated tokens with current policy
+        new_logprobs = []
+        for i, token_id in enumerate(new_tokens):
+            if i < len(gen.scores):
+                logits = gen.scores[i][0]
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                logprob = log_probs[token_id]
+                new_logprobs.append(logprob)
+        
+        if new_logprobs:
+            new_logprobs = torch.stack(new_logprobs)
+            new_logprobs_sum = new_logprobs.sum()
+        else:
+            new_logprobs_sum = torch.tensor(0.0, device=self.device)
+        
+        # Ensure old_logprobs is on the right device and has the right shape
+        if old_logprobs.dim() == 1:
+            old_logprobs = old_logprobs.unsqueeze(0)
+        old_logprobs = old_logprobs.to(self.device)
+        old_logprobs_sum = old_logprobs.sum()
+        
         # Compute advantages (since scalar reward, values=0)
         advantages = batch_rewards - 0
         
-        # Compute PPO ratio and clipped surrogate objective
-        ratio = torch.exp(new_logprobs - old_logprobs)
+        # Compute PPO ratio
+        ratio = torch.exp(new_logprobs_sum - old_logprobs_sum)
+        ratio = ratio.unsqueeze(0)  # Make it 1D to match advantages
+        
+        # Compute clipped surrogate objective
+        from ppo_core import clipped_surrogate
         loss_pg = -clipped_surrogate(advantages, ratio).mean()
         
-        # KL divergence penalty
+        # KL divergence penalty (using input logprobs vs old generated logprobs)
         loss_kl = self.kl_beta * torch.nn.functional.kl_div(
-                      new_logprobs, old_logprobs, log_target=True, reduction='batchmean')
+                      input_logprobs, old_logprobs_sum.expand_as(input_logprobs), 
+                      log_target=True, reduction='batchmean')
         
         # Total loss
         loss = loss_pg + loss_kl
         
-        # Debug: check if loss requires gradients
-        # print(f"Loss requires grad: {loss.requires_grad}")
-        # print(f"Loss grad_fn: {loss.grad_fn}")
-
         # Backward pass with projection
         self.opt.zero_grad()
         loss.backward()
@@ -138,7 +174,7 @@ class ShieldedPPO:
             'loss': loss.item(),
             'loss_pg': loss_pg.item(),
             'loss_kl': loss_kl.item(),
-            'kl': (new_logprobs-old_logprobs).mean().item(),
+            'kl': (new_logprobs_sum-old_logprobs_sum).item(),
             'ratio_mean': ratio.mean().item(),
             'ratio_min': ratio.min().item(),
             'ratio_max': ratio.max().item(),

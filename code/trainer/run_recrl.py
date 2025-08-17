@@ -147,7 +147,7 @@ def run(ds, cfg):
     final_ckpt = ROOT/"checkpoints"/f"recrl_{ds}_epoch{cfg['epochs']-1}.pt"
     save_checkpoint_meta(
         final_ckpt, ds, cfg['epochs']-1, 
-        avg_reward.item(), avg_kl.item(), total_time
+        avg_reward, avg_kl, total_time
     )
     
     print(f"\n{'='*80}")

@@ -14,7 +14,44 @@ Usage:
 import random, torch, os, json, pathlib, argparse, time
 from pathlib import Path
 from shielded_ppo_trainer import ShieldedPPO
-from reward import click_reward
+from reward import improved_click_reward
+
+def compute_logprobs(model, tokenizer, prompt, max_new_tokens=80, **kwargs):
+    """Compute log probabilities for generated tokens."""
+    model.eval()
+    with torch.no_grad():
+        # Tokenize the prompt
+        inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
+        
+        # Generate tokens
+        gen = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.9,
+            top_p=0.95,
+            repetition_penalty=1.05,
+            pad_token_id=tokenizer.eos_token_id,
+            return_dict_in_generate=True,
+            output_scores=True  # This gives us the logits for each generated token
+        )
+        
+        # Extract the generated tokens (exclude the input prompt)
+        new_tokens = gen.sequences[0][inputs['input_ids'].shape[1]:]
+        
+        # Compute log probabilities for the generated tokens
+        logprobs = []
+        for i, token_id in enumerate(new_tokens):
+            if i < len(gen.scores):
+                logits = gen.scores[i][0]  # Get logits for this token
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                logprob = log_probs[token_id].item()
+                logprobs.append(logprob)
+        
+        # Decode the generated text
+        generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        
+        return generated_text, torch.tensor(logprobs, device=model.device)
 
 def main(args):
     # Initialize project path
@@ -54,56 +91,44 @@ def main(args):
         seed=args.seed
     )
     
-    # Sample prompts for testing
+    # Better prompts that are more likely to generate longer responses
     prompts = [
-        "User likes fantasy novels like LOTR and Harry Potter. Explain why we recommend Mistborn.",
-        "User enjoys sci-fi movies with time travel. Explain why we recommend Interstellar.",
-        "User likes strategy games with resource management. Explain why we recommend Civilization VI."
+        "Write a detailed explanation of why Mistborn would appeal to fans of Lord of the Rings and Harry Potter. Include specific elements like magic systems, world-building, and character development.",
+        "Explain why we recommend the Mistborn series to fantasy readers. Describe the unique aspects of Brandon Sanderson's writing style and how it compares to other fantasy authors.",
+        "Give a comprehensive recommendation for Mistborn. Discuss the magic system, plot complexity, and why it's perfect for readers who enjoyed epic fantasy series."
     ]
     
     # Use just the first prompt for simplicity
     test_prompt = prompts[0]
-    old_logp = torch.zeros(1, device=agent.device)
     
     # Print initial generation
     print("\nInitial generation:")
-    initial_text = agent.generate([test_prompt], max_new_tokens=40, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.1)[0]
+    initial_text, initial_logprobs = compute_logprobs(agent.model, agent.tokenizer, test_prompt)
     print(f"Prompt: {test_prompt}")
     print(f"Generated: {initial_text}")
-    initial_reward = click_reward(initial_text)
-    print(f"Reward: {initial_reward}\n")
+    initial_reward = improved_click_reward(initial_text)
+    print(f"Reward: {initial_reward:.3f}\n")
     
     # Run the PPO loop
     print(f"Running toy PPO loop for {args.steps} steps...")
     start_time = time.time()
     
     all_metrics = []
+    old_logprobs = initial_logprobs  # Start with the initial generation's logprobs
+    
     for step in range(args.steps):
-        # 1. Generate explanation
-        with torch.no_grad():
-            inputs = agent.tokenizer([test_prompt], return_tensors="pt").to(agent.device)
-            gen = agent.model.generate(
-                **inputs,
-                max_new_tokens=40,
-                do_sample=True,
-                temperature=0.8,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                pad_token_id=agent.tokenizer.eos_token_id,
-                # Don't set eos_token_id to allow longer generation
-            )
-            # Only decode the newly generated tokens (exclude the input prompt)
-            new_tokens = gen[0][inputs['input_ids'].shape[1]:]
-            generated_text = agent.tokenizer.decode(new_tokens, skip_special_tokens=True)
-            text = test_prompt + " " + generated_text  # Full text for reward
-            if len(new_tokens) > 1:  # Only print if we actually generated something
-                print(f"Generated: '{generated_text[:100]}...' (length: {len(new_tokens)})")
+        # 1. Generate explanation and compute log probabilities
+        generated_text, new_logprobs = compute_logprobs(agent.model, agent.tokenizer, test_prompt)
+        text = test_prompt + " " + generated_text  # Full text for reward
         
-        # 2. Compute reward
-        r = torch.tensor([click_reward(text)], device=agent.device)
+        if len(new_logprobs) > 1:  # Only print if we actually generated something
+            print(f"Generated: '{generated_text[:150]}...' (length: {len(new_logprobs)})")
         
-        # 3. Run optimization step
-        metrics = agent.optimise([test_prompt], r, old_logp)
+        # 2. Compute reward using improved function
+        r = torch.tensor([improved_click_reward(text)], device=agent.device)
+        
+        # 3. Run optimization step with proper log probabilities
+        metrics = agent.optimise([test_prompt], r, old_logprobs)
         all_metrics.append(metrics)
         
         # 4. Log metrics
@@ -112,18 +137,21 @@ def main(args):
         
         # Print progress
         if step % 5 == 0 or step == args.steps - 1:
-            print(f"Step {step+1}/{args.steps}: loss={metrics['loss']:.4f}, reward={r.item():.1f}")
+            print(f"Step {step+1}/{args.steps}: loss={metrics['loss']:.4f}, reward={r.item():.3f}")
+        
+        # Store current logprobs for next iteration
+        old_logprobs = new_logprobs.detach()
     
     end_time = time.time()
     print(f"\nTraining completed in {end_time - start_time:.2f} seconds")
     
     # Print final generation
     print("\nFinal generation:")
-    final_text = agent.generate([test_prompt], max_new_tokens=40, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.1)[0]
+    final_text, _ = compute_logprobs(agent.model, agent.tokenizer, test_prompt)
     print(f"Prompt: {test_prompt}")
     print(f"Generated: {final_text}")
-    final_reward = click_reward(final_text)
-    print(f"Reward: {final_reward}\n")
+    final_reward = improved_click_reward(final_text)
+    print(f"Reward: {final_reward:.3f}\n")
     
     # Save the trained model
     ckpt_path = proj/"checkpoints"/f"recrl_{args.dataset}_toy.pt"
@@ -137,9 +165,9 @@ def main(args):
     
     # Check if reward improved
     if final_reward > initial_reward:
-        print("\n✅ Success: Reward improved!")
+        print(f"\n✅ Success: Reward improved from {initial_reward:.3f} to {final_reward:.3f}!")
     else:
-        print("\n⚠️ Warning: Reward did not improve")
+        print(f"\n⚠️ Warning: Reward did not improve (initial: {initial_reward:.3f}, final: {final_reward:.3f})")
     
     # Close W&B if used
     if use_wandb:
