@@ -313,25 +313,3 @@ If you use this code in your research, please cite:
 3. Make your changes
 4. Add tests if applicable
 5. Submit a pull request
-
-## 📄 License
-
-[Add your license information here]
-
-## 🙏 Acknowledgments
-
-- SASRec implementation based on [SASRec-PyTorch](https://github.com/kang205/SASRec)
-- LoRA implementation using [PEFT](https://github.com/huggingface/peft)
-- Evaluation metrics from [RecSim-NG](https://github.com/google-research/recsim_ng)
-
-## 📞 Support
-
-For questions and issues:
-1. Check the troubleshooting section above
-2. Review the documentation in `docs/`
-3. Open an issue on GitHub
-4. Check the project's discussion page
-
----
-
-**Note**: This is a research implementation. For production use, additional testing and optimization may be required.
