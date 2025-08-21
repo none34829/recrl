@@ -6,7 +6,7 @@ This repository contains the implementation of **Shielded RecRL**, a novel metho
 
 Shielded RecRL uses a two-tower architecture:
 - **Frozen Ranking Model**: SASRec (collaborative filtering) that remains unchanged
-- **Trainable Language Model**: GPT-J-6B with LoRA adapters that generates explanations
+- **Trainable Language Model**: TinyLlama-1.1B with LoRA adapters that generates explanations
 
 The gradient projection technique ensures that the explanation model can learn to generate helpful explanations without degrading the ranking model's recommendation quality.
 
